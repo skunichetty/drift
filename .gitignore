@@ -1,0 +1,22 @@
+# data files
+*.csv
+*.json
+*.parquet
+
+# database
+*.db
+data
+
+# caches
+.cache
+__pycache__
+
+# configuration
+.vscode
+
+# environment
+venv
+env
+
+# other build files
+custom_deps

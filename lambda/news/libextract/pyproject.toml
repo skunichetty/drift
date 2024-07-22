@@ -1,0 +1,14 @@
+[build-system]
+requires = ["setuptools"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "libextract"
+version = "0.0.1"
+dependencies = [
+    "requests",
+    "SQLAlchemy",
+    "psycopg2-binary",
+    "beautifulsoup4",
+    'importlib-metadata; python_version>="3.10"'
+]
