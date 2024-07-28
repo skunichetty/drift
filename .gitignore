@@ -20,3 +20,5 @@ env
 
 # other build files
 custom_deps
+build
+**/*.egg-info

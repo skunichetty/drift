@@ -1,45 +1,38 @@
-from datetime import date, datetime
-from dataclasses import dataclass
-from collections import deque, abc
 import json
+import logging
+from collections import abc, deque
+from dataclasses import dataclass
+from datetime import date
+from io import BytesIO
 
-MONTH_FMT_STRING = "%Y-%m"
+from libmarket.request import MonthlyRequest
 
-@dataclass
-class Request:
-    symbol: str
-    month: date  
+import boto3
+from botocore.exceptions import ClientError
 
-    @staticmethod
-    def from_string(symbol: str, month: str) -> "Request":
-        date_obj = datetime.strptime(month, MONTH_FMT_STRING) 
-        return Request(symbol, date_obj.date())
+logger = logging.getLogger(__name__)
 
-    @staticmethod
-    def from_dict(rep: dict[str, str]) -> "Request":
-        try:
-            return Request.from_string(rep["symbol"], rep["month"]) 
-        except KeyError:
-            raise ValueError(f"Invalid dictionary representation: {rep}")
-        
-    def as_dict(self) -> dict[str, str]:
-        month_str = self.month.strftime(MONTH_FMT_STRING)
-        return {"symbol": self.symbol, "month": month_str}
 
-class RequestQueue(abc.Collection[Request]):
+class RequestQueue(abc.Collection[MonthlyRequest]):
     def __init__(self):
-        self.requests : deque[Request] = deque([])
-        self.index : dict[str, set[date]] = {}
+        self.requests: deque[MonthlyRequest] = deque([])
+        self.index: dict[str, set[date]] = {}
 
-    def add(self, request: Request): 
+    @staticmethod
+    def from_str(data: str) -> "RequestQueue":
+        queue = RequestQueue()
+        queue.deserialize(data)
+        return queue
+
+    def add(self, request: MonthlyRequest):
         self.requests.append(request)
-        
+
         self.index.setdefault(request.symbol, set())
         self.index[request.symbol].add(request.month)
 
-    def pop(self) -> Request:
+    def pop(self) -> MonthlyRequest:
         request = self.requests.popleft()
-        
+
         symbol_requests = self.index[request.symbol]
         symbol_requests.remove(request.month)
         return request
@@ -50,7 +43,7 @@ class RequestQueue(abc.Collection[Request]):
     def __len__(self) -> int:
         return len(self.requests)
 
-    def __contains__(self, request: Request) -> bool:
+    def __contains__(self, request: MonthlyRequest) -> bool:
         if request.symbol in self.index:
             requests = self.index[request.symbol]
             return request.month in requests
@@ -63,9 +56,7 @@ class RequestQueue(abc.Collection[Request]):
         clean_requests = [request.as_dict() for request in self.requests]
         return json.dumps(clean_requests)
 
-    @staticmethod
-    def deserialize(data: str) -> "RequestQueue":
-        queue = RequestQueue()
+    def deserialize(self, data: str):
         content = json.loads(data)
 
         if not isinstance(content, list):
@@ -73,7 +64,45 @@ class RequestQueue(abc.Collection[Request]):
 
         for index, request_data in enumerate(content):
             if not isinstance(request_data, dict):
-                raise ValueError(f"Expected dict at index {index} in list, received {type(content)}")
-            queue.add(Request.from_dict(request_data))
+                raise ValueError(
+                    f"Expected dict at index {index} in list, received {type(content)}"
+                )
+            self.add(MonthlyRequest.from_dict(request_data))
 
-        return queue
+
+class S3BackedRequestQueue(RequestQueue):
+    def __init__(self):
+        super().__init__()
+        self.s3_client = boto3.client("s3")
+
+    def load(self, bucket_name: str, file_name: str):
+        logger.debug("Loading request queue from S3 - %s:%s", bucket_name, file_name)
+        buffer = BytesIO()
+        try:
+            self.s3_client.download_fileobj(bucket_name, file_name, buffer)
+            self.deserialize(buffer.read().decode())
+        except (ClientError, UnicodeError) as e:
+            logger.debug("Unable to load request queue from s3: %s", str(e))
+
+    def save(self, bucket_name: str, file_name: str):
+        logger.debug("Saving request queue to S3 - %s:%s", bucket_name, file_name)
+        try:
+            buffer = BytesIO(self.serialize().encode())
+            self.s3_client.upload_fileobj(buffer, bucket_name, file_name)
+        except (ClientError, UnicodeError) as e:
+            logger.error("Unable to save request queue to S3: %s", str(e))
+
+
+@dataclass
+class RequestQueueS3BucketConfiguration:
+    bucket_name: str
+    file_name: str
+
+
+@dataclass
+class RequestQueueS3Configuration:
+    def __init__(
+        self, input_bucket: str, input_file: str, output_bucket: str, output_file: str
+    ):
+        self.load = RequestQueueS3BucketConfiguration(input_bucket, input_file)
+        self.save = RequestQueueS3BucketConfiguration(output_bucket, output_file)
