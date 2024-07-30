@@ -17,6 +17,7 @@ __pycache__
 # environment
 venv
 env
+*.env
 
 # other build files
 custom_deps

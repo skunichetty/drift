@@ -1,0 +1,19 @@
+services:
+  lambda:
+    build:
+      dockerfile: aws.Dockerfile
+    networks:
+      - main-network
+    env_file: env_files/test.lambda.env
+    ports:
+      - "9000:8080"
+  postgres:
+    image: postgres
+    env_file: env_files/test.postgres.env
+    hostname: postgres-server
+    networks:
+      - main-network
+
+networks:
+  main-network: {}
+

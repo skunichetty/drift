@@ -3,8 +3,11 @@ from datetime import date, datetime
 from typing import Any, Generator
 
 import requests
+import logging
 
 API_REQUEST_LIMIT = 25
+
+logger = logging.getLogger(__name__)
 
 
 def getenv_safe(name: str):
@@ -22,12 +25,13 @@ class API:
         self.session = None
 
     def build_url(self, endpoint: str, **kwargs: str) -> str:
-        base = f"{self.BASE_URL}?{endpoint}"
+        base = f"{self.BASE_URL}?function={endpoint}&"
         arguments = [f"{key}={kwargs[key]}" for key in kwargs]
         return base + "&".join(arguments)
 
     def request(self, url: str) -> Any:
         if self.request_count < API_REQUEST_LIMIT:
+            logger.debug("Querying API: %s", url)
 
             if self.session is None:
                 self.session = requests.session()
@@ -63,13 +67,14 @@ class API:
         url = self.build_url("TIME_SERIES_INTRADAY", **args)
         intraday_json = self.request(url)
 
-        for timestamp in intraday_json[f"Time Series ({interval})"]:
+        intraday_series = intraday_json[f"Time Series ({interval})"]
+        for timestamp in intraday_series:
             yield {
                 "symbol": symbol,
                 "timestamp": datetime.fromisoformat(timestamp),
-                "open": float(intraday_json[timestamp]["1. open"]),
-                "high": float(intraday_json[timestamp]["2. high"]),
-                "low": float(intraday_json[timestamp]["3. low"]),
-                "close": float(intraday_json[timestamp]["4. close"]),
-                "volume": int(intraday_json[timestamp]["5. volume"]),
+                "open": float(intraday_series[timestamp]["1. open"]),
+                "high": float(intraday_series[timestamp]["2. high"]),
+                "low": float(intraday_series[timestamp]["3. low"]),
+                "close": float(intraday_series[timestamp]["4. close"]),
+                "volume": int(intraday_series[timestamp]["5. volume"]),
             }

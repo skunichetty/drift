@@ -8,12 +8,20 @@ from libmarket.queue import (
 )
 from libmarket.request import parse_request, IntradayRequest
 
+logging.getLogger().propagate = False  # prevent root logger settings from propagating
+
+handler = logging.StreamHandler()
+formatter = logging.Formatter("%(asctime)s [%(name)s - %(levelname)s] - %(message)s")
+handler.setFormatter(formatter)
+handler.setLevel(logging.DEBUG)
 
 logger = logging.getLogger(__name__)
+logger.setLevel(logging.DEBUG)
+logger.addHandler(handler)
 
-BUCKET_NAME = "drift"
-RQ_FILENAME = "mdata-rq.json"
-
+libmarket_logger = logging.getLogger("libmarket")
+libmarket_logger.setLevel(logging.DEBUG)
+libmarket_logger.addHandler(handler)
 
 """
 Event schema:
@@ -37,10 +45,16 @@ Event schema:
 }
 """
 
-request_queue_config = RequestQueueS3Configuration(
-    BUCKET_NAME, RQ_FILENAME, BUCKET_NAME, RQ_FILENAME
+BUCKET_NAME = getenv_safe("BUCKET_NAME")
+REQUEST_QUEUE_FNAME = getenv_safe("REQUEST_QUEUE_FNAME")
+
+config = OrchestratorConfiguration(
+    RequestQueueS3Configuration(
+        BUCKET_NAME, REQUEST_QUEUE_FNAME, BUCKET_NAME, REQUEST_QUEUE_FNAME
+    ),
+    getenv_safe("DB_URI"),
 )
-config = OrchestratorConfiguration(request_queue_config, getenv_safe("DB_URI"))
+
 orchestrator = MarketDataOrchestrator(config)
 
 
@@ -57,9 +71,6 @@ def lambda_handler(event, context):
     try:
         orchestrator.run(read_requests(event))
     except Exception as e:
-        logger.error(e)
+        logger.error(e.__class__.__name__)
+        logger.error(e, exc_info=True)
         exit(1)
-
-
-if __name__ == "__main__":
-    lambda_handler({"symbol": "IBM"}, None)

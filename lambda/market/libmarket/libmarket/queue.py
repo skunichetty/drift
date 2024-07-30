@@ -76,21 +76,23 @@ class S3BackedRequestQueue(RequestQueue):
         self.s3_client = boto3.client("s3")
 
     def load(self, bucket_name: str, file_name: str):
-        logger.debug("Loading request queue from S3 - %s:%s", bucket_name, file_name)
+        logger.debug("Loading request queue from S3 - %s/%s", bucket_name, file_name)
         buffer = BytesIO()
         try:
-            self.s3_client.download_fileobj(bucket_name, file_name, buffer)
-            self.deserialize(buffer.read().decode())
+            response = self.s3_client.get_object(Bucket=bucket_name, Key=file_name)
+            self.deserialize(response["Body"].read())
         except (ClientError, UnicodeError) as e:
-            logger.debug("Unable to load request queue from s3: %s", str(e))
+            logger.debug("Unable to load request queue from s3")
+            logger.debug("-> %s", str(e))
 
     def save(self, bucket_name: str, file_name: str):
-        logger.debug("Saving request queue to S3 - %s:%s", bucket_name, file_name)
+        logger.debug("Saving request queue to S3 - %s/%s", bucket_name, file_name)
         try:
             buffer = BytesIO(self.serialize().encode())
             self.s3_client.upload_fileobj(buffer, bucket_name, file_name)
         except (ClientError, UnicodeError) as e:
-            logger.error("Unable to save request queue to S3: %s", str(e))
+            logger.debug("Unable to save request queue to s3")
+            logger.debug("-> %s", str(e))
 
 
 @dataclass

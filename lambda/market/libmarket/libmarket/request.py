@@ -74,7 +74,7 @@ class HistoricalIntradayRequest(IntradayRequest):
 
     @override
     def get_subrequests(self) -> Generator[MonthlyRequest, None, None]:
-        delta = relativedelta(month=1)
+        delta = relativedelta(months=1)
 
         current = self.start_date
         while current <= self.end_date:
