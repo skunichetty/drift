@@ -4,11 +4,12 @@ from collections import abc, deque
 from dataclasses import dataclass
 from datetime import date
 from io import BytesIO
-
-from libmarket.request import MonthlyRequest
+from typing import Iterable
 
 import boto3
 from botocore.exceptions import ClientError
+
+from libmarket.request import MonthlyRequest
 
 logger = logging.getLogger(__name__)
 
@@ -25,10 +26,16 @@ class RequestQueue(abc.Collection[MonthlyRequest]):
         return queue
 
     def add(self, request: MonthlyRequest):
-        self.requests.append(request)
+        if request in self:
+            raise RuntimeError(f"Duplicate request already exists in queue: {request}")
 
+        self.requests.append(request)
         self.index.setdefault(request.symbol, set())
         self.index[request.symbol].add(request.month)
+
+    def extend(self, requests: Iterable[MonthlyRequest]):
+        for request in requests:
+            self.add(request)
 
     def pop(self) -> MonthlyRequest:
         request = self.requests.popleft()
@@ -77,7 +84,6 @@ class S3BackedRequestQueue(RequestQueue):
 
     def load(self, bucket_name: str, file_name: str):
         logger.debug("Loading request queue from S3 - %s/%s", bucket_name, file_name)
-        buffer = BytesIO()
         try:
             response = self.s3_client.get_object(Bucket=bucket_name, Key=file_name)
             self.deserialize(response["Body"].read())

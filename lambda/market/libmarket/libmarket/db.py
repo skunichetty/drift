@@ -1,9 +1,9 @@
+import logging
 from datetime import date, datetime
 from typing import Any, Generator
 
 import sqlalchemy as db
 import sqlalchemy.dialects.postgresql as postgresql
-import logging
 
 logger = logging.getLogger(__name__)
 

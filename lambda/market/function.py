@@ -8,42 +8,22 @@ from libmarket.queue import (
 )
 from libmarket.request import parse_request, IntradayRequest
 
-logging.getLogger().propagate = False  # prevent root logger settings from propagating
-
 handler = logging.StreamHandler()
-formatter = logging.Formatter("%(asctime)s [%(name)s - %(levelname)s] - %(message)s")
+formatter = logging.Formatter(
+    "%(asctime)s [%(levelname)s] (%(name)s) %(message)s", "%d %b %Y %H:%M:%S,%f"
+)
 handler.setFormatter(formatter)
 handler.setLevel(logging.DEBUG)
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
 logger.addHandler(handler)
+logger.propagate = False
 
 libmarket_logger = logging.getLogger("libmarket")
 libmarket_logger.setLevel(logging.DEBUG)
 libmarket_logger.addHandler(handler)
-
-"""
-Event schema:
-{
-    request: [
-        {
-            // Download historical data (month by month basis) 
-            symbol: "AAA",
-            type: "historical",
-            options: {
-                start_date: "2020-01",
-                end_date: "2024-07",
-            }
-        },
-        {
-            // Download most recent day of data
-            symbol: "AAA",
-            type: "day"
-        }
-    ]
-}
-"""
+libmarket_logger.propagate = False
 
 BUCKET_NAME = getenv_safe("BUCKET_NAME")
 REQUEST_QUEUE_FNAME = getenv_safe("REQUEST_QUEUE_FNAME")

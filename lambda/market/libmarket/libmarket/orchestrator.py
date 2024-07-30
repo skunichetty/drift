@@ -1,12 +1,12 @@
 import logging
 from dataclasses import dataclass
-from typing import Iterable
+from itertools import chain
+from typing import Generator, Iterable
 
 from libmarket.db import MarketDataTableAPI
 from libmarket.fetch import API
 from libmarket.queue import RequestQueueS3Configuration, S3BackedRequestQueue
 from libmarket.request import IntradayRequest, IntradayRequestType, MonthlyRequest
-
 
 logger = logging.getLogger(__name__)
 
@@ -24,37 +24,57 @@ class MarketDataOrchestrator:
         self.table_api = MarketDataTableAPI(config.db_uri)
         self.mdata_api = API()
 
-    def get_new_subrequests(self, request: IntradayRequest) -> Iterable[MonthlyRequest]:
-        logger.debug(
-            "Getting subrequests for symbol %s (%s)", request.symbol, request.type
-        )
-        if request.type == IntradayRequestType.DAILY:
-            logger.debug("Generating subrequest for most recent month")
-            yield from request.get_subrequests()
-        elif request.type == IntradayRequestType.HISTORICAL:
-            months_in_db = set(self.table_api.fetch_months(request.symbol))
-            logger.debug("Found %d months already in DB", len(months_in_db))
-            for subrequest in request.get_subrequests():
-                if (
-                    subrequest not in self.request_queue
-                    and subrequest.as_dict()["month"] not in months_in_db
-                ):
-                    yield subrequest
-
-    def run(self, requests: Iterable[IntradayRequest]):
-        logger.debug("Starting orchestration job")
-
         self.request_queue.load(
             self.config.request_queue_config.load.bucket_name,
             self.config.request_queue_config.load.file_name,
         )
+
+    def _filter_from_db(
+        self, request: IntradayRequest
+    ) -> Generator[MonthlyRequest, None, None]:
+        months_in_db = set(self.table_api.fetch_months(request.symbol))
+        logger.debug(
+            "Found %d months in DB for symbol %s", len(months_in_db), request.symbol
+        )
+        for subrequest in request.get_subrequests():
+            if subrequest.as_dict()["month"] not in months_in_db:
+                yield subrequest
+
+    def filter_subrequests(self, request: IntradayRequest) -> Iterable[MonthlyRequest]:
+        logger.debug("Getting subrequests for %s (%s)", request.symbol, request.type)
+
+        stream = request.get_subrequests()
+        if request.type == IntradayRequestType.HISTORICAL:
+            # for historical data, avoid querying data stored to DB
+            # for daily request, will ALWAYS redownload most recent day
+            stream = self._filter_from_db(request)
+
+        for subrequest in stream:
+            if subrequest not in self.request_queue:
+                yield subrequest
+
+    def download_and_export(self):
+        request = None
+        try:
+            while not self.request_queue.empty():
+                request = self.request_queue.pop()
+                print(request)
+                rows = list(
+                    self.mdata_api.intraday(symbol=request.symbol, month=request.month)
+                )
+                self.table_api.export(rows)
+        except RuntimeError as e:
+            logger.debug(e)
+            if request is not None:
+                self.request_queue.add(request)
+
+    def run(self, requests: Iterable[IntradayRequest]):
+        logger.debug("Starting orchestration job")
+
         initial_queue_size = len(self.request_queue)
 
         with self.table_api:
-            for request in requests:
-                for subrequest in self.get_new_subrequests(request):
-                    self.request_queue.add(subrequest)
-
+            self.request_queue.extend(chain(*map(self.filter_subrequests, requests)))
             final_queue_size = len(self.request_queue)
 
             if self.request_queue.empty():
@@ -64,21 +84,10 @@ class MarketDataOrchestrator:
             logger.debug(
                 "Added %d new requests to queue. Approximate processing time: %f days",
                 final_queue_size - initial_queue_size,
-                min(1, final_queue_size / 25),
+                max(1, final_queue_size / 25),
             )
 
-            request = None
-            try:
-                request = self.request_queue.pop()
-                rows = list(
-                    self.mdata_api.intraday(symbol=request.symbol, month=request.month)
-                )
-                self.table_api.export(rows)
-            except RuntimeError as e:
-                if request is not None:
-                    self.request_queue.add(request)
-                logger.debug(e)
-
+            self.download_and_export()
             self.table_api.commit()
 
         self.request_queue.save(

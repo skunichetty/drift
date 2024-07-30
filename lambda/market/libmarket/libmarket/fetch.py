@@ -1,9 +1,9 @@
+import logging
 import os
 from datetime import date, datetime
 from typing import Any, Generator
 
 import requests
-import logging
 
 API_REQUEST_LIMIT = 25
 
