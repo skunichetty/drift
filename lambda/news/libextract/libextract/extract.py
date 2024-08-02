@@ -5,7 +5,7 @@ from datetime import datetime
 
 from bs4 import BeautifulSoup
 
-ARTICLE_LINK_PATTERN = re.compile(r"\.\/articles\/(\w+)(?:\?\S*)?")
+ARTICLE_LINK_PATTERN = re.compile(r"\.\/(?:articles|read)\/(\w+)(?:\?\S*)?")
 
 
 def valid_link(link: Any) -> bool:
@@ -43,7 +43,7 @@ def _extract_publisher(article: Any) -> str | None:
     return publisher.text.lower()
 
 
-def _extract_link_info(article: Any) -> tuple[str] | tuple[None, None]:
+def _extract_link_info(article: Any) -> tuple[str, str] | tuple[None, None]:
     """Extract (ID, Title) from article if exists, else return tuple of None."""
     valid_links = list(filter(valid_link, article.find_all("a")))
 
@@ -54,7 +54,9 @@ def _extract_link_info(article: Any) -> tuple[str] | tuple[None, None]:
     else:
         link = valid_links[0]
         match = ARTICLE_LINK_PATTERN.match(link.get("href"))
-        return match.group(1), link.text
+        if match is not None:
+            return match.group(1), link.text
+        return None, None
 
 
 def extract_headlines(page_data: str) -> list[dict[str : str | datetime | None]] | None:
