@@ -23,4 +23,5 @@ class Attention(torch.nn.Module):
 
         scores = torch.bmm(query, key_vectors.transpose(1, 2)) / sqrt(self.query_dim)
         weights = torch.nn.functional.softmax(scores, dim=2)
-        return torch.bmm(weights, value_vectors)
+        result = torch.bmm(weights, value_vectors)
+        return result

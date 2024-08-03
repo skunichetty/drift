@@ -1,15 +1,22 @@
 import argparse
 import logging
 from datetime import datetime
+from collections.abc import Callable
 
 import torch
-from torch.utils.data import DataLoader
+from torch.utils.data import Dataset, DataLoader
 
 from infra.data import load_data
-from infra.data.dataset import NextClosePredictorDataset, FuturecastDataset
+from infra.data.dataset import (
+    NextClosePredictorDataset,
+    FuturecastDataset,
+    WalkerDataset,
+)
 from infra.models.close import ClosingPricePredictor
 from infra.models.futurecast import Futurecaster, AttentiveFuturecaster
+from infra.models.walker import DiscreteWalker
 from infra.train import train_model
+from infra.utils import raise_if_none
 
 logger = logging.getLogger("infra")
 logger.setLevel(logging.DEBUG)
@@ -29,6 +36,112 @@ file_handler = logging.FileHandler(
 file_handler.setFormatter(file_formatter)
 file_handler.setLevel(logging.DEBUG)
 logger.addHandler(file_handler)
+
+
+def dataset_factory(
+    args: argparse.Namespace,
+    num_classes: int | None = None,
+) -> Dataset:
+    train, val, pipeline = load_data(
+        args.task, args.symbol, args.start_date, args.end_date, num_classes
+    )
+
+    if args.task == "close":
+        train_ds = NextClosePredictorDataset(train)
+        val_ds = NextClosePredictorDataset(val)
+    elif args.task in ("futurecast", "afuturecast"):
+        train_ds = FuturecastDataset(
+            train, args.input_sequence_length, args.output_sequence_length
+        )
+        val_ds = FuturecastDataset(
+            val, args.input_sequence_length, args.output_sequence_length
+        )
+    elif args.task == "walker":
+        train_ds = WalkerDataset(
+            train.iloc[:10000],
+            pipeline,
+            raise_if_none(num_classes),
+            args.input_sequence_length,
+            args.output_sequence_length,
+        )
+        val_ds = WalkerDataset(
+            val.iloc[:5000],
+            pipeline,
+            raise_if_none(num_classes),
+            args.input_sequence_length,
+            args.output_sequence_length,
+        )
+    else:
+        raise ValueError(f"Unknown task: {args.task}")
+    return train_ds, val_ds, pipeline
+
+
+def model_factory(
+    args: argparse.Namespace,
+    input_size: int,
+    num_classes: int | None = None,
+    teacher_forcing_ratio: float | None = None,
+) -> torch.nn.Module:
+    if args.task == "close":
+        model = ClosingPricePredictor(
+            input_size=input_size,
+            hidden_size=args.hidden_size,
+            output_size=1,
+        )
+    elif args.task == "futurecast":
+        model = Futurecaster(
+            input_size=input_size,
+            hidden_size=args.hidden_size,
+            output_size=1,
+            input_sequence_length=args.input_sequence_length,
+            output_sequence_length=args.output_sequence_length,
+            teacher_forcing=teacher_forcing_ratio is not None,
+        )
+    elif args.task == "afuturecast":
+        model = AttentiveFuturecaster(
+            input_size=input_size,
+            hidden_size=args.hidden_size,
+            output_size=1,
+            input_sequence_length=args.input_sequence_length,
+            output_sequence_length=args.output_sequence_length,
+            teacher_forcing_ratio=teacher_forcing_ratio,
+        )
+    elif args.task == "walker":
+        model = DiscreteWalker(
+            input_size=input_size,
+            hidden_size=args.hidden_size,
+            output_size=raise_if_none(num_classes),
+            input_sequence_length=args.input_sequence_length,
+            output_sequence_length=args.output_sequence_length,
+            teacher_forcing_ratio=teacher_forcing_ratio,
+        )
+    else:
+        raise ValueError(f"Unknown task: {args.task}")
+    return model
+
+
+def loss_factory(args: argparse.Namespace) -> Callable:
+    if args.task == "walker":
+        base = torch.nn.CrossEntropyLoss()
+
+        def custom_loss(outputs: torch.Tensor, labels: torch.Tensor):
+            # flatten across timestep dimension
+            flat_outputs = outputs.flatten(end_dim=1)
+            flat_labels = labels.flatten(end_dim=1).argmax(dim=1)
+            return base(flat_outputs, flat_labels)
+
+        return custom_loss
+    else:
+
+        def custom_loss(outputs, labels):
+            # Penalize later predictions more
+            scale = torch.arange(1, outputs.size(1) + 1, 1, device=outputs.device)
+            diff = outputs - labels
+            loss = torch.mean((diff * scale) ** 2)
+            return loss
+
+        return custom_loss
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Train pricing model.")
@@ -59,74 +172,62 @@ if __name__ == "__main__":
         help="End date for training data in YYYY-MM-DD format.",
     )
     parser.add_argument(
+        "input_sequence_length",
+        type=int,
+        help="Length of input sequence for the model.",
+    )
+    parser.add_argument(
+        "output_sequence_length",
+        type=int,
+        help="Length of output sequence for the model.",
+    )
+    parser.add_argument(
         "task",
         type=str,
-        choices=["close", "futurecast", "afuturecast"],
+        choices=["close", "futurecast", "afuturecast", "walker"],
         help="Type of training task to complete",
     )
     args = parser.parse_args()
 
     logger.info(
-        f"Training model for {args.symbol} from {args.start_date} to {args.end_date}"
+        "Training %s model for %s from %s to %s",
+        args.task,
+        args.symbol,
+        args.start_date,
+        args.end_date,
+    )
+    logger.info(
+        "Settings: Input Sequence Length: %d, Output Sequence Length: %d",
+        args.input_sequence_length,
+        args.output_sequence_length,
+    )
+    logger.info(
+        "Hyperparameters: Hidden Size: %d, Learning Rate: %f", args.hidden_size, args.lr
     )
 
     try:
-        train, val, pipeline = load_data(args.symbol, args.start_date, args.end_date)
+        train_dataset, val_dataset, pipeline = dataset_factory(args, num_classes=20)
 
-        if args.task == "close":
-            train_ds = NextClosePredictorDataset(train)
-            val_ds = NextClosePredictorDataset(val)
-        elif args.task == "futurecast":
-            train_ds = FuturecastDataset(train, 48, 12)
-            val_ds = FuturecastDataset(val, 48, 12)
-        elif args.task == "afuturecast":
-            train_ds = FuturecastDataset(train, 48, 48)
-            val_ds = FuturecastDataset(val, 48, 48)
+        train_loader = DataLoader(
+            train_dataset, batch_size=args.batch_size, shuffle=True
+        )
+        val_loader = DataLoader(val_dataset, batch_size=args.batch_size)
+        model = model_factory(
+            args,
+            len(train_dataset.feature_names),
+            num_classes=20,
+            teacher_forcing_ratio=0.5,
+        )
 
-        train_loader = DataLoader(train_ds, batch_size=args.batch_size, pin_memory=True)
-        val_loader = DataLoader(val_ds, batch_size=args.batch_size)
-
-        if args.task == "close":
-            model = ClosingPricePredictor(
-                input_size=len(train_ds.feature_names),
-                hidden_size=args.hidden_size,
-                output_size=1,
-            )
-        elif args.task == "futurecast":
-            model = Futurecaster(
-                input_size=len(train_ds.feature_names),
-                hidden_size=args.hidden_size,
-                output_size=1,
-                input_sequence_length=48,
-                output_sequence_length=48,
-                teacher_forcing=True,
-            )
-        elif args.task == "afuturecast":
-            model = AttentiveFuturecaster(
-                input_size=len(train_ds.feature_names),
-                hidden_size=args.hidden_size,
-                output_size=1,
-                input_sequence_length=48,
-                output_sequence_length=48,
-                teacher_forcing_ratio=1,
-            )
-
+        loss_fn = loss_factory(args)
         optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
         scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
             optimizer, T_0=4, T_mult=2
         )
 
-        def get_custom_loss():
-            loss_base = torch.nn.L1Loss()
-
-            def custom_loss(outputs, labels):
-                return 10 * loss_base(outputs, labels)
-
-            return custom_loss
-
         history = train_model(
             model,
-            get_custom_loss(),
+            loss_fn,
             optimizer,
             scheduler,
             train_loader,

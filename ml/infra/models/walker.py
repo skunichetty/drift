@@ -1,19 +1,19 @@
+from typing import Generator
+
 import torch
 import torch.nn.functional as F
 
-from infra.models.rnn import LSTMCell, GRUCell
 from infra.models.attention import Attention
+from infra.models.rnn import GRUCell
 
-from typing import Generator
 
-
-class FuturecasterRegressor(torch.nn.Module):
+class WalkerRegressor(torch.nn.Module):
     def __init__(
         self,
         input_size: int,
         output_size: int,
     ):
-        super(FuturecasterRegressor, self).__init__()
+        super(WalkerRegressor, self).__init__()
         self.fc1 = torch.nn.Linear(input_size, 256)
         self.fc2 = torch.nn.Linear(256, output_size)
 
@@ -31,59 +31,7 @@ class FuturecasterRegressor(torch.nn.Module):
         return x
 
 
-class Futurecaster(torch.nn.Module):
-    def __init__(
-        self,
-        input_size: int,
-        hidden_size: int,
-        output_size: int,
-        input_sequence_length: int,
-        output_sequence_length: int,
-        teacher_forcing: bool = False,
-    ):
-        super(Futurecaster, self).__init__()
-        self.encoder_cell = LSTMCell(input_size, hidden_size)
-        self.decoder_cell = LSTMCell(output_size, hidden_size)
-        self.regressor = FuturecasterRegressor(hidden_size, output_size)
-
-        self.input_sequence_length = input_sequence_length
-        self.output_sequence_length = output_sequence_length
-
-        self.teacher_forcing = teacher_forcing
-
-    def forward(
-        self,
-        x: torch.Tensor,
-        y: torch.Tensor = None,
-        c: torch.Tensor = None,
-        h: torch.Tensor = None,
-    ) -> torch.Tensor:
-        if c is None:
-            c = torch.zeros(x.size(0), self.encoder_cell.hidden_size).to(x.device)
-        if h is None:
-            h = torch.zeros(x.size(0), self.encoder_cell.hidden_size).to(x.device)
-
-        encoder_hidden_states = []
-        for i in range(self.input_sequence_length):
-            h, c = self.encoder_cell(x[:, i], c, h)
-            encoder_hidden_states.append(h)
-
-        h, c = self.decoder_cell(x[:, -1, 0:1], c, h)
-        closing_prices = [self.regressor(h)]
-
-        if self.training and y is not None and self.teacher_forcing:
-            for i in range(self.output_sequence_length - 1):
-                h, c = self.decoder_cell(y[:, i : i + 1], c, h)
-                closing_prices.append(self.regressor(h))
-        else:
-            for _ in range(self.output_sequence_length - 1):
-                h, c = self.decoder_cell(closing_prices[-1], c, h)
-                closing_prices.append(self.regressor(h))
-
-        return torch.concat(closing_prices, dim=1)
-
-
-class AttentiveFuturecaster(torch.nn.Module):
+class DiscreteWalker(torch.nn.Module):
     def __init__(
         self,
         input_size: int,
@@ -93,14 +41,15 @@ class AttentiveFuturecaster(torch.nn.Module):
         output_sequence_length: int,
         teacher_forcing_ratio: float | None = None,
     ):
-        super(AttentiveFuturecaster, self).__init__()
+        super(DiscreteWalker, self).__init__()
         self.encoder = GRUCell(input_size, hidden_size)
         self.decoder = GRUCell(output_size + hidden_size, hidden_size)
-        self.regressor = FuturecasterRegressor(hidden_size, output_size)
+        self.regressor = WalkerRegressor(hidden_size, output_size)
         self.attention = Attention(output_size, hidden_size, hidden_size)
 
         self.input_sequence_length = input_sequence_length
         self.output_sequence_length = output_sequence_length
+        self.output_size = output_size
 
         self.teacher_forcing = teacher_forcing_ratio is not None
         self.teacher_forcing_ratio = teacher_forcing_ratio
@@ -108,12 +57,12 @@ class AttentiveFuturecaster(torch.nn.Module):
     def _teacher_forcing_stream(
         self, x: torch.Tensor, y: torch.Tensor, closing_prices: list[torch.Tensor]
     ) -> Generator[torch.Tensor, None, None]:
-        yield x[:, -1, 0:1]
+        yield x[:, -1, : self.output_size]
         for i in range(self.output_sequence_length - 1):
             random = torch.rand(1).item()
             if random < self.teacher_forcing_ratio:
                 # yield true label
-                yield y[:, i : i + 1]
+                yield y[:, i]
             else:
                 # yield the model's prediction
                 yield closing_prices[-1]
@@ -141,10 +90,10 @@ class AttentiveFuturecaster(torch.nn.Module):
 
         hidden_states = torch.stack(hidden_states, dim=1)
 
-        closing_prices = [x[:, -1, 0:1]]
-        stream = self._inference_stream(closing_prices)
+        walk_deltas = [x[:, -1, : self.output_size]]
+        stream = self._inference_stream(walk_deltas)
         if self.training and y is not None and self.teacher_forcing:
-            stream = self._teacher_forcing_stream(x, y, closing_prices)
+            stream = self._teacher_forcing_stream(x, y, walk_deltas)
 
         h = torch.randn(x.size(0), self.encoder.hidden_size).to(x.device)
         for prev_close in stream:
@@ -152,6 +101,6 @@ class AttentiveFuturecaster(torch.nn.Module):
                 :, 0
             ]
             h = self.decoder(torch.concat([prev_close, attn_embedding], dim=1), h)
-            closing_prices.append(self.regressor(h))
+            walk_deltas.append(self.regressor(h))
 
-        return torch.concat(closing_prices[1:], dim=1)
+        return torch.stack(walk_deltas[1:], dim=1)

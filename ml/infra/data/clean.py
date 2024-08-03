@@ -1,9 +1,11 @@
 import pandas as pd
-from sklearn.preprocessing import FunctionTransformer, StandardScaler
+from sklearn.preprocessing import FunctionTransformer, StandardScaler, KBinsDiscretizer
 from sklearn.pipeline import Pipeline
 from sklearn.compose import ColumnTransformer
 import numpy as np
 import logging
+
+from infra.utils import raise_if_none
 
 logger = logging.getLogger(__name__)
 
@@ -51,43 +53,63 @@ def add_delta(df: pd.DataFrame) -> pd.DataFrame:
     return frame
 
 
-def get_pipeline():
-    pipeline = Pipeline(
-        [
+def get_pipeline(task: str, num_classes: int | None) -> Pipeline:
+    steps = [
+        (
+            "ts_encoder",
+            ColumnTransformer(
+                [
+                    ("ts_encode", FunctionTransformer(ts_encode), ["timestamp"]),
+                    (
+                        "regular_hours",
+                        FunctionTransformer(is_regular_hours),
+                        ["timestamp"],
+                    ),
+                    (
+                        "delta",
+                        FunctionTransformer(add_delta),
+                        ["open", "close", "high", "low"],
+                    ),
+                ],
+                remainder="passthrough",
+                verbose_feature_names_out=False,
+            ).set_output(transform="pandas"),
+        ),
+        (
+            "scale",
+            ColumnTransformer(
+                [
+                    (
+                        "scale",
+                        StandardScaler(),
+                        ["volume"],
+                    )
+                ],
+                remainder="passthrough",
+                verbose_feature_names_out=False,
+            ).set_output(transform="pandas"),
+        ),
+    ]
+    if task == "walker":
+        steps.append(
             (
-                "ts_encoder",
+                "discretize_labels",
                 ColumnTransformer(
                     [
-                        ("ts_encode", FunctionTransformer(ts_encode), ["timestamp"]),
                         (
-                            "regular_hours",
-                            FunctionTransformer(is_regular_hours),
-                            ["timestamp"],
+                            "discretize",
+                            KBinsDiscretizer(
+                                n_bins=raise_if_none(num_classes),
+                                encode="onehot-dense",
+                                strategy="quantile",
+                            ),
+                            ["delta_close"],
                         ),
-                        (
-                            "delta",
-                            FunctionTransformer(add_delta),
-                            ["open", "close", "high", "low"],
-                        ),
+                        ("delta_close_pass", "passthrough", ["delta_close"]),
                     ],
                     remainder="passthrough",
                     verbose_feature_names_out=False,
                 ).set_output(transform="pandas"),
-            ),
-            (
-                "scale",
-                ColumnTransformer(
-                    [
-                        (
-                            "scale",
-                            StandardScaler(),
-                            ["volume"],
-                        )
-                    ],
-                    remainder="passthrough",
-                    verbose_feature_names_out=False,
-                ).set_output(transform="pandas"),
-            ),
-        ]
-    )
-    return pipeline
+            )
+        )
+    return Pipeline(steps)
